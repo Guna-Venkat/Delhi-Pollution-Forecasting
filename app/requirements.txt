@@ -1,0 +1,27 @@
+# Core data science
+numpy==1.26.4
+pandas==2.2.2
+scikit-learn==1.5.0
+scipy==1.13.0
+
+# Models
+xgboost==2.1.0
+torch==2.3.0
+joblib==1.4.2
+
+# Explainability
+shap==0.46.0
+
+# Dashboard
+streamlit==1.36.0
+plotly==5.22.0
+
+# HF Hub (model loading from HF repo)
+huggingface_hub==0.23.4
+
+# Optional: UMAP for embedding viz
+umap-learn==0.5.6
+
+# Stats models (for SARIMA, only needed if running modeling notebook)
+# statsmodels==0.14.2
+# pmdarima==2.0.4
