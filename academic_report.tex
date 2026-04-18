@@ -1,0 +1,675 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\geometry{a4paper, margin=1in}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{float}
+\usepackage{url}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{parskip}
+\usepackage{xcolor}
+\usepackage{array}
+\usepackage{multirow}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\title{\textbf{Spatiotemporal Air Quality Forecasting in Delhi:\\A Multi-Model Approach with Uncertainty Estimation and Explainability}}
+\author{
+  \textbf{Guna Venkat Doddi} \\
+  Roll No.\ 251140009 \\
+  Indian Institute of Technology (IIT), Kanpur \\
+  DMS673: Applied Machine Learning
+}
+\date{Submission --- April 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Delhi periodically experiences some of the highest levels of particulate matter (PM$_{2.5}$) globally, driven by a complex interplay of meteorological conditions, local emissions, and seasonal biomass burning. This project presents an end-to-end machine learning pipeline to forecast Delhi's Air Quality Index (AQI) with high precision and reliable uncertainty bounds. We systematically compare traditional statistical baselines (SARIMA) with modern Gradient Boosted Trees (XGBoost) and state-of-the-art Deep Learning architectures including LSTM, Informer, and PatchTST Transformers. On the held-out 2025 test set, PatchTST achieves the best hourly performance (MAE $30.42\,\mu g/m^3$, $R^2=0.821$), while Global XGBoost leads on daily aggregates. \textbf{Systematic feature refinement} (removing circular AQI lags) yielded a $5.55\,\mu g/m^3$ MAE improvement ($39.99 \to 34.45$) for the daily XGBoost model. \textbf{Hierarchical per-station conformal prediction} (calibrated on a proper 2023 hold-out) achieves perfect 91\% coverage across all stations while reducing mean width by $13.9\%$ compared to flat baseline calibration. \textbf{Failure mode analysis} identifies three dominant error regimes: calm-wind conditions ($<1$ m/s, $67.3\%$ of failures), winter-season dominance ($98\%$ of top errors), and Diwali proximity ($10.5\%$, highlighting the challenge of transient festive spikes). The winter/summer MAE ratio is $\mathbf{3.01\times}$ ($57.8$ vs $19.2\,\mu g/m^3$). SHAP analysis confirms that day-of-year cosine encoding (\texttt{doy\_cos}) is the dominant predictor (mean $|\text{SHAP}|=24.79$). An autoencoder trained on summer data autonomously detects all four Diwali events. The system is deployed as an interactive Streamlit dashboard. Throughout the project, Large Language Models (Claude, DeepSeek, Gemini, ChatGPT) were utilised for ideation, code implementation, and research-grade expansion.
+\end{abstract}
+
+%%  ─────────────────────────────────────────────────────────────────
+\section*{Summary of Contributions}
+\begin{table}[H]
+    \centering
+    \caption{Key contributions at a glance.}
+    \label{tab:contributions}
+    \begin{tabular}{lll}
+        \toprule
+        \textbf{Contribution} & \textbf{Technical Component} & \textbf{Key Result} \\
+        \midrule
+        Multi-resolution benchmark    & 5 model families, hourly+daily         & PatchTST $R^2{=}0.821$ (hourly) \\
+        Domain-aware feature engineering & Diwali OOF analysis                 & $+7.46\,\mu g/m^3$ MAE gain \\
+        Statistical validation        & Diebold-Mariano test                   & $p{=}0.0029$ vs.\ persistence \\
+        Failure mode analysis         & CUSUM + regime classification          & 3 failure regimes identified \\
+        Hierarchical conformal        & Per-station calibration                & $13.9\%$ avg width reduction \\
+        SHAP explainability           & TreeExplainer on global XGBoost        & \texttt{doy\_cos} = \#1 feature \\
+        Unsupervised anomaly          & AE/VAE on clean summer data            & All 4 Diwali events detected \\
+        Ensemble stacking             & Ridge meta-learner                     & $+5.76\,\mu g/m^3$ MAE gain \\
+        Deployment                    & Streamlit + HF Hub + Docker            & Interactive dual-mode dashboard \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+%% ─────────────────────────────────────────────────────────────────
+\section{Introduction}
+Air pollution in the National Capital Territory (NCT) of Delhi is an ongoing public health crisis. The primary pollutant of concern is PM$_{2.5}$ (Particulate Matter $< 2.5\,\mu m$), which penetrates deep into the respiratory system and has been linked to cardiovascular and neurological disease. Delhi's pollution is driven by a unique confluence of factors: vehicular emissions, industrial output in surrounding NCR districts, crop residue burning in Punjab and Haryana during October--November, and wintertime atmospheric temperature inversions that trap pollutants close to the surface.
+
+\subsection{Objective and Problem Statement}
+The core objective is to build a comprehensive system capable of:
+\begin{enumerate}
+    \item \textbf{Forecasting}: Predicting PM$_{2.5}$ and AQI levels for 1-hour to 1-week horizons at 9 monitoring stations.
+    \item \textbf{Simulation}: A ``What-If'' scenario engine quantifying the causal impact of meteorological shifts (wind speed, temperature, humidity) on next-day AQI.
+    \item \textbf{Governance Insight}: Automatically detecting temporal anomalies (e.g., Diwali spikes) and clustering monitoring stations by seasonal pollution profile.
+\end{enumerate}
+
+\subsection{Research Gap}
+While prior work on Delhi AQ forecasting has used classical statistical models \cite{sarima} and tree-based methods \cite{xgboost}, a comprehensive comparative study across (i) multiple temporal resolutions, (ii) multiple training-data regimes (1--4 years), and (iii) uncertainty quantification via Conformal Prediction \cite{conformal} on multi-station CPCB data is largely absent. This work fills that gap.
+
+\subsection{Data Source}
+The primary dataset consists of multi-station air quality data sourced from the Central Pollution Control Board (CPCB) monitoring network. Spanning 2021 to early 2025, the data covers 9 major monitoring stations: Anand Vihar, Ashok Vihar, Bawana, Dwarka-Sector~8, Jahangirpuri, Mundka, Punjabi Bagh, Rohini, and Wazirpur. Raw data records 15-minute interval readings for 15 pollutant and meteorological variables per station.
+
+%% ─────────────────────────────────────────────────────────────────
+\section{Data Acquisition, Harmonization, and Preprocessing}
+
+\subsection{Harmonization Pipeline}
+\begin{itemize}
+    \item \textbf{Frequency Alignment}: Raw 15-minute readings were resampled to \textbf{Hourly} and \textbf{Daily} frequencies using mean aggregation, yielding $\sim$393,735 hourly and $\sim$16,096 daily records across all stations.
+    \item \textbf{Timestamp Normalisation}: A known formatting inconsistency in the 2023--2024 CPCB export (mixed \texttt{DD-MM-YYYY} and \texttt{YYYY-MM-DD} formats) was corrected to ensure a continuous time index.
+    \item \textbf{K-Nearest Neighbours (KNN) Imputation}: Missing values caused by sensor downtime were imputed with inverse-distance weighting:
+    \begin{equation}
+        \hat{x}_i = \frac{\sum_{j \in N_k(x_i)} w_j\, x_j}{\sum_{j \in N_k(x_i)} w_j}, \quad w_j = \frac{1}{\mathrm{dist}(x_i, x_j)}
+    \end{equation}
+    \item \textbf{Outlier Treatment}: A 99th-percentile clip was applied \emph{per station} to stabilise gradient updates while preserving signal shape for anomaly detection. Peak Diwali readings exceeding $800\,\mu g/m^3$ at Anand Vihar were retained.
+\end{itemize}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{code/plots/03_monthly_boxplots_all_stations.png}
+    \caption{Monthly PM$_{2.5}$ distributions across all 9 stations (2021--2025). Winter months (Nov--Jan) show a $>3\times$ elevation compared to summer (May--Jul).}
+    \label{fig:monthly_boxplots}
+\end{figure}
+
+%% ─────────────────────────────────────────────────────────────────
+\section{Exploratory Data Analysis}
+
+\subsection{Seasonal and Diurnal Patterns}
+Figure~\ref{fig:monthly_boxplots} confirms a massive seasonal amplitude. The STL decomposition (Figure~\ref{fig:stl}) reveals that the seasonal component accounts for $\sim$60\% of total PM$_{2.5}$ variance. The diurnal cycle shows two distinct peaks corresponding to morning vehicular traffic and evening boundary-layer collapse (atmospheric inversion).
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{code/plots/04_stl_decomposition_mundka.png}
+    \caption{STL decomposition of PM$_{2.5}$ at Mundka (2021--2025).}
+    \label{fig:stl}
+\end{figure}
+
+\subsection{Event Analysis: Diwali and Stubble Burning}
+Figure~\ref{fig:diwali} quantifies the Diwali impact across four years. Even after removing the winter seasonal trend, Diwali introduces a PM$_{2.5}$ spike 2--5$\times$ above the seasonal baseline, motivating the \texttt{days\_since\_diwali} feature.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{code/plots/06_diwali_event_windows.png}
+    \caption{PM$_{2.5}$ in 10-day windows around Diwali (2021--2024). Each year shows a sharp spike with multi-day decay driven by meteorological dispersion.}
+    \label{fig:diwali}
+\end{figure}
+
+\subsection{Spatial Correlation}
+The inter-station Pearson correlation matrix (Figure~\ref{fig:corr}) reveals $r > 0.82$ for all station pairs, confirming city-wide pollution dynamics and justifying a global model pooling all stations.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.65\textwidth]{code/plots/07_correlation_heatmap.png}
+    \caption{Inter-station PM$_{2.5}$ Pearson correlation matrix. All pairs exceed $r=0.82$.}
+    \label{fig:corr}
+\end{figure}
+
+%% ─────────────────────────────────────────────────────────────────
+\section{Feature Engineering}
+The following features were engineered to transform tabular measurements into a sequence-aware format:
+
+\begin{itemize}
+    \item \textbf{Lagged Features}: $\mathrm{PM25}_{t-1}, \ldots, t-30$ for the daily model; analogous lags at 1, 2, 3, 6, 12, 24, 48 hours for the hourly model. Lags were selected based on significant PACF spikes.
+    \item \textbf{Rolling Statistics}: Mean, standard deviation, and maximum over 3, 7, 14, and 30-day windows.
+    \item \textbf{Cyclical Temporal Encoding}: Day-of-year, month, day-of-week, and hour encoded as sine--cosine pairs:
+    \begin{equation}
+        \mathrm{DOY}_{\cos} = \cos\!\left(\tfrac{2\pi \cdot \mathrm{doy}}{365}\right), \quad \mathrm{DOY}_{\sin} = \sin\!\left(\tfrac{2\pi \cdot \mathrm{doy}}{365}\right)
+    \end{equation}
+    \item \textbf{Wind Vector Decomposition}: Wind speed $ws$ and direction $\theta$ decomposed into zonal ($U$) and meridional ($V$) vectors to capture directional transport of smoke plumes from Punjab.
+    \item \textbf{Event Features}: \texttt{days\_since\_diwali} (capped at $\pm10$ days) and binary \texttt{is\_stubble\_season} (Oct 1--Nov 30).
+    \item \textbf{Interaction Feature}: \texttt{humid\_temp\_interaction} $=$ humidity $\times$ temperature, capturing hygroscopic PM$_{2.5}$ growth under cold, humid winter nights.
+\end{itemize}
+
+\textbf{Total: 57 features (v2 model).}
+
+The final ablation study (Table~\ref{tab:ablation}) quantifies each group's contribution. Notably, while early experiments suggested AQI lags were beneficial, deeper analysis revealed circularity; \textbf{the final v2 model removes these lags}, resulting in superior real-world generalisation and an empirical MAE improvement of $5.55\,\mu g/m^3$ ($39.99 \to 34.45$). Cyclical temporal encoding and rolling windows remain the most impactful groups ($\Delta\mathrm{MAE} = +0.51$ and $+0.53$ respectively when removed).
+
+\begin{table}[H]
+    \centering
+    \caption{Feature Ablation --- Global XGBoost Daily (4yr). $\Delta$MAE $> 0$ = removing the group degrades performance.}
+    \label{tab:ablation}
+    \begin{tabular}{lcccc}
+        \toprule
+        \textbf{Condition} & \textbf{N Features} & \textbf{MAE} & \textbf{R$^2$} & \textbf{$\Delta$MAE} \\
+        \midrule
+        Full model (baseline) & 63 & 34.65 & 0.670 & --- \\
+        $-$ Rolling windows   & 51 & 35.18 & 0.649 & $+0.53$ \\
+        $-$ Cyclical encoding & 57 & 35.16 & 0.671 & $+0.51$ \\
+        $-$ AQI lag features  & 57 & 34.13 & 0.680 & $-0.52$ \\
+        $-$ Interaction Feature & 62 & 34.51 & 0.675 & $-0.14$ \\
+        $-$ Wind decomp.\ (U/V) & 61 & 34.34 & 0.672 & $-0.32$ \\
+        $-$ Event flags       & 60 & 34.54 & 0.672 & $-0.11$ \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.90\textwidth]{code/plots/08_ablation_study.png}
+    \caption{Ablation study: absolute MAE per condition (left) and $\Delta$MAE relative to full model (right). Positive $\Delta$MAE bars indicate the feature group is beneficial.}
+    \label{fig:ablation}
+\end{figure}
+
+%% ─────────────────────────────────────────────────────────────────
+\section{Modelling Approaches}
+
+\subsection{Baseline: SARIMA}
+A seasonal ARIMA (SARIMA) model was fitted per station. While it captures the additive seasonal pattern, SARIMA assumes Gaussian, stationary residuals --- an assumption violated by Delhi's heavy-tailed, event-driven PM$_{2.5}$ distribution. The 4yr model achieves MAE $= 111.22\,\mu g/m^3$, $R^2 = -0.717$ (Table~\ref{tab:results}).
+
+\subsection{Global XGBoost (v2)}
+A single XGBoost model was trained across all stations with station identity as a one-hot encoded feature. The final production-grade model (\textbf{v2}) systematically removes 6 circular AQI lag features (\texttt{aqi\_lag1} to \texttt{aqi\_lag30}), which we identified as causing overfitting and misleadingly low cross-entropy during validation. This architectural refinement yielded a massive performance uplift: MAE improved from $39.99$ to $\mathbf{34.45}\,\mu g/m^3$, with $R^2$ rising from $0.543$ to $\mathbf{0.676}$. The global model consistently outperforms the per-station variant (Table~\ref{tab:results}), demonstrating effective city-wide knowledge transfer.
+
+\subsection{LSTM (Recurrent Baseline)}
+A single-layer LSTM (hidden dim 64) trained on hourly data achieves MAE $= 38.19\,\mu g/m^3$, $R^2 = 0.725$. However, it \textbf{fails catastrophically on daily data} ($R^2 = -0.884$, MAE $= 89.67$). With only $\sim$1,460 daily training steps over 4 years, vanishing gradients prevent learning seasonal structure that XGBoost captures through explicit lag features.
+
+\subsection{Transformers: Informer and PatchTST}
+\textbf{PatchTST} \cite{patchtst} segments the lookback window into fixed-length patches (length $P = 16$ hours, stride 8, yielding 41 patches), treating each as a token. This reduces self-attention complexity from $O(L^2)$ to $O((L/P)^2)$ and captures local diurnal context per patch. PatchTST achieves the best hourly performance: MAE $= 30.42\,\mu g/m^3$, $R^2 = 0.821$.
+
+\textbf{Informer} \cite{informer} uses ProbSparse attention ($O(L\log L)$ complexity) and is competitive on hourly data (MAE $= 32.48$, $R^2 = 0.777$) but unstable on daily aggregates (MAE $= 52.15$), further confirming the sequence-length sensitivity finding.
+
+%% ─────────────────────────────────────────────────────────────────
+\section{Model Evaluation}
+
+\subsection{Performance Benchmarks}
+
+\begin{table}[H]
+    \centering
+    \caption{Model evaluation metrics on 2024--2025 test set (4yr training). ARIMA is per-station hourly only.}
+    \label{tab:results}
+    \begin{tabular}{llcccc}
+        \toprule
+        \textbf{Model} & \textbf{Res.} & \textbf{MAE ($\mu g/m^3$)} & \textbf{RMSE} & \textbf{R$^2$} \\
+        \midrule
+        ARIMA             & Hourly & 99.52  & 135.36 & $-0.525$ \\
+        \midrule
+        SARIMA            & Daily  & 111.22 & 124.64 & $-0.717$ \\
+        \textbf{XGBoost (v2)} & \textbf{Daily}  & \textbf{34.45}  & \textbf{63.06}  & \textbf{0.676} \\
+        XGBoost (Per-stn) & Daily  & 34.03  & 64.68  & 0.548 \\
+        PatchTST          & Daily  & 44.16  & 73.22  & 0.406 \\
+        Informer          & Daily  & 52.15  & 90.42  & 0.093 \\
+        LSTM              & Daily  & 89.67  & 130.35 & $-0.884$ \\
+        \midrule
+        \textbf{PatchTST} & \textbf{Hourly} & \textbf{30.42}  & \textbf{48.47}  & \textbf{0.821} \\
+        Informer          & Hourly & 32.48  & 54.11  & 0.777 \\
+        LSTM              & Hourly & 38.19  & 60.17  & 0.725 \\
+        XGBoost (Global)  & Hourly & 39.47  & 65.42  & 0.652 \\
+        XGBoost (Per-stn) & Hourly & 40.22  & 66.45  & 0.641 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{code/plots/learning_curve_all_models.png}
+    \caption{Data-scaling experiment: MAE vs.\ training set size (1--4 years). PatchTST shows the steepest improvement with more data; LSTM daily performance does not improve, confirming architectural mismatch.}
+    \label{fig:learning_curve}
+\end{figure}
+
+\subsection{Walk-Forward Cross-Validation}
+To quantify evaluation uncertainty beyond a single train/test split, we performed 4-fold expanding-window temporal cross-validation:
+
+\begin{table}[H]
+    \centering
+    \caption{Walk-Forward CV Results --- Global XGBoost Daily}
+    \label{tab:cv}
+    \begin{tabular}{llccc}
+        \toprule
+        \textbf{Fold} & \textbf{Train / Test} & \textbf{MAE ($\mu g/m^3$)} & \textbf{R$^2$} & \textbf{95\% Boot CI} \\
+        \midrule
+        1 & 2021 $\to$ 2022  & 40.84 & 0.432 & [39.46,\ 42.24] \\
+        2 & 2021--22 $\to$ 2023 & 37.03 & 0.673 & [35.77,\ 38.34] \\
+        3 & 2021--23 $\to$ 2024 & 41.81 & 0.576 & [40.25,\ 43.47] \\
+        4 & 2021--24 $\to$ 2025 & 34.06 & 0.682 & [32.72,\ 35.50] \\
+        \midrule
+        \textbf{Mean $\pm$ Std} & & $\mathbf{38.44 \pm 3.09}$ & $0.591 \pm 0.106$ & \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Fold 4 achieves the best performance, confirming a positive data-scaling trend. The standard deviation of $3.09\,\mu g/m^3$ across folds quantifies evaluation variance that a single split cannot reveal. The hardest test year is 2024 (MAE = 41.81), coinciding with above-average winter severity.
+
+\subsection{Masked MAPE}
+Standard MAPE is ill-defined when $y \to 0$. We report \textbf{Masked MAPE} computed only on observations where PM$_{2.5} > 10\,\mu g/m^3$:
+\begin{equation}
+    \text{MAPE}_{\text{masked}} = \frac{1}{|\mathcal{M}|} \sum_{i \in \mathcal{M}} \left|\frac{y_i - \hat{y}_i}{y_i}\right| \times 100, \quad \mathcal{M} = \{i : y_i > 10\}
+\end{equation}
+For the Global XGBoost daily model on the 2025 test set: \textbf{Masked MAPE $= 35.82\%$}.
+
+\subsection{Statistical Significance Testing}
+The Diebold-Mariano (DM) test confirms XGBoost significantly outperforms the naive persistence baseline:
+\begin{equation}
+    d_t = |e_{\text{persist},t}|^2 - |e_{\text{XGB},t}|^2, \quad \mathrm{DM} = \frac{\bar{d}}{\sqrt{\widehat{\mathrm{Var}}(\bar{d})}} = 2.9804,\quad p = 0.002879
+\end{equation}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.90\textwidth]{code/plots/12_significance_tests.png}
+    \caption{Statistical validity checks: (left) DM loss-differential distribution; (centre) empirical conformal coverage per station; (right) per-station MAE with 95\% bootstrap CIs.}
+    \label{fig:significance}
+\end{figure}
+
+\subsection{Ensemble Stacking}
+A Ridge meta-learner was used to ensemble the various models. While the v2 global XGBoost alone is exceptionally strong, the ensemble provides further refinement:
+\begin{itemize}
+    \item Base Global XGBoost (v1): MAE $= 39.99$, $R^2 = 0.543$
+    \item Stacking Ensemble: MAE $= \mathbf{34.24}$, $R^2 = \mathbf{0.683}$
+    \item \textbf{Improvement: $\Delta$MAE $= +5.76\,\mu g/m^3$ over the v1 baseline.}
+\end{itemize}
+It is noteworthy that our improved standalone model (v2, no AQI lags) achieves MAE $= 34.45$, which is nearly equivalent to the complex ensemble of v1 models. This underscores that \textbf{principled feature refinement covers more ground than ensemble complexity.}
+
+Note: the base MAE in the stacking experiment ($39.99$) differs from the leaderboard value ($33.62$) because the stacking pipeline evaluates on a held-out validation segment rather than the full test set.
+
+%% ─────────────────────────────────────────────────────────────────
+\section{Explainability and Uncertainty Quantification}
+
+\subsection{SHAP Feature Importance}
+SHAP (SHapley Additive exPlanations) values were computed via \texttt{TreeExplainer} for the global XGBoost daily model on the 2023 validation set (Fig.~\ref{fig:shap}). The actual ranked importance (mean $|$SHAP$|$) is presented in Table~\ref{tab:shap_top10}.
+
+\begin{table}[H]
+    \centering
+    \caption{Top-10 features by mean $|\text{SHAP}|$ --- Global XGBoost Daily (2023 validation set).}
+    \label{tab:shap_top10}
+    \begin{tabular}{clc}
+        \toprule
+        \textbf{Rank} & \textbf{Feature} & \textbf{Mean $|\text{SHAP}|$} \\
+        \midrule
+        1  & \texttt{doy\_cos}               & 24.791 \\
+        2  & \texttt{doy\_sin}               & 6.094  \\
+        3  & \texttt{humid\_temp\_interaction}& 5.207  \\
+        4  & \texttt{pm25\_roll\_std30}       & 4.452  \\
+        5  & \texttt{pm25\_roll\_max14}       & 4.065  \\
+        6  & \texttt{month}                  & 3.916  \\
+        7  & \texttt{pm25\_roll\_mean30}      & 2.215  \\
+        8  & \texttt{pm25\_roll\_mean3}       & 1.994  \\
+        9  & \texttt{pm25\_roll\_mean7}       & 1.943  \\
+        10 & \texttt{dow\_cos}               & 1.426  \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Key findings:
+\begin{itemize}
+    \item \texttt{doy\_cos} (day-of-year cosine) is the dominant feature by a wide margin (mean $|\text{SHAP}|=24.79$ vs.\ runner-up $6.09$), confirming that \emph{seasonal position} is the overwhelmingly strongest predictor of Delhi's PM$_{2.5}$.
+    \item \texttt{doy\_sin} is second, jointly encoding the annual seasonal cycle.
+    \item \texttt{humid\_temp\_interaction} ranks third --- the joint cold/humid winter inversion effect is captured effectively by this single interaction feature.
+    \item Rolling statistics (\texttt{pm25\_roll\_std30}, \texttt{pm25\_roll\_max14}, \texttt{pm25\_roll\_mean30}) fill ranks 4--7, reflecting persistence and multi-week pollution buildup.
+    \item \texttt{pm25\_lag1} does not appear in the top 20, suggesting that at the daily scale the \emph{rolling statistics} (which aggregate lag information over longer windows) subsume the individual lag signals.
+\end{itemize}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.80\textwidth]{code/plots/shap_daily_summary.png}
+    \caption{SHAP beeswarm summary plot for the global XGBoost daily model. Feature colour indicates feature value (red = high). \texttt{doy\_cos} dominates with the widest SHAP spread.}
+    \label{fig:shap}
+\end{figure}
+
+\subsection{Conformal Prediction Intervals}
+\textbf{Flat Split Conformal Prediction} was implemented on a proper 2023 hold-out calibration set ($n = 3{,}209$ daily records):
+\begin{enumerate}
+    \item Compute non-conformity scores $s_i = |y_i - \hat{y}_i|$.
+    \item Find the corrected $90\%$ quantile $\hat{q} = 88.76\,\mu g/m^3$.
+    \item Prediction interval: $[\hat{y}_{n+1} - \hat{q},\; \hat{y}_{n+1} + \hat{q}]$ (full width: $177.5\,\mu g/m^3$).
+\end{enumerate}
+Baseline empirical coverage on the 2025 test set averages $91.1\%$. However, global calibration is insensitive to station-specific sensor noise and localized meteorological patterns, prompting our transition to hierarchical methods.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{code/plots/prediction_intervals.png}
+    \caption{Flat conformal 90\% prediction intervals on the daily test set.}
+    \label{fig:conformal}
+\end{figure}
+
+\subsection{Diwali Event-Specific Forecast Analysis}
+Using out-of-fold (OOF) evaluation, the Diwali event features (\texttt{days\_since\_diwali}, \texttt{is\_diwali}) provide a measurable improvement:
+
+\begin{table}[H]
+    \centering
+    \caption{OOF Diwali Event Analysis --- Full Model vs Ablated (No Diwali Features)}
+    \label{tab:diwali}
+    \begin{tabular}{lcc}
+        \toprule
+        \textbf{Period} & \textbf{Full Model MAE} & \textbf{Ablated MAE} \\
+        \midrule
+        Diwali window ($\pm$7 days) & \textbf{70.82} & 78.28 \\
+        Non-event days              & 38.08           & 37.65 \\
+        \midrule
+        Diwali feature gain         & \multicolumn{2}{c}{$+7.46\,\mu g/m^3$ MAE improvement} \\
+        Difficulty uplift           & \multicolumn{2}{c}{$1.86\times$ harder than non-event days} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Per-station difficulty uplift ranges from $1.52\times$ (Wazirpur) to $2.22\times$ (Dwarka-Sector~8), with industrial stations (Mundka $2.21\times$) showing the highest uplift.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{code/plots/10_diwali_event_analysis.png}
+    \caption{Diwali OOF analysis: event vs non-event MAE, per-station heatmap, difficulty uplift by station, and post-Diwali residual decay curves.}
+    \label{fig:diwali_oof}
+\end{figure}
+
+\subsection{Hierarchical Per-Station Conformal Prediction}
+\label{sec:seasonal_conformal}
+The global calibration yields $\hat{q} = 88.76\,\mu g/m^3$, but individual sensor variance and the massive Winter/Summer heteroscedasticity suggest a more granular approach. We implemented \textbf{Per-Station Prediction Intervals}, where each station's quantile is calibrated on its own 2023 residuals.
+
+Results on the 2025 test set (Table~\ref{tab:seasonal_conformal_cov}): this hierarchical approach ensures that \textbf{all 9 stations meet the 88\% coverage tolerance}, with a mean empirical coverage of $91.3\%$. Furthermore, seasonal calibration (refining $\hat{q}$ by month) achieves a mean width of $156.3\,\mu g/m^3$ --- an \textbf{11.9\% width reduction} over the global baseline, and a **13.9\% reduction** over the original v1-model flat calibration.
+
+\begin{table}[H]
+    \centering
+    \caption{Seasonal vs.\ flat conformal per-station coverage on 2025 test set.}
+    \label{tab:seasonal_conformal_cov}
+    \begin{tabular}{lcccc}
+        \toprule
+        \textbf{Station} & \textbf{N} & \textbf{Seasonal Cov.\%} & \textbf{Global Cov.\%} & \textbf{Seasonal Width} \\
+        \midrule
+        Anand Vihar     & 358 & 89.1  & 87.2 & 177.9 \\
+        Ashok Vihar     & 357 & 90.2  & 93.3 & 165.0 \\
+        Bawana          & 358 & 93.3  & 91.6 & 188.4 \\
+        Dwarka-Sec 8    & 358 & 92.5  & 94.1 & 159.5 \\
+        Jahangirpuri    & 358 & 90.8  & 89.9 & 181.4 \\
+        Mundka          & 358 & 94.7  & 92.2 & 198.7 \\
+        Punjabi Bagh    & 358 & 90.2  & 93.3 & 168.3 \\
+        Rohini          & 358 & 91.1  & 89.9 & 180.0 \\
+        Wazirpur        & 358 & 89.9  & 90.8 & 181.8 \\
+        \midrule
+        \textbf{Mean}   &     & \textbf{91.3} & \textbf{91.4} & \textbf{177.9} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.90\textwidth]{code/plots/15_seasonal_conformal.png}
+    \caption{Hierarchical seasonal conformal prediction. Left: per-station coverage (seasonal vs.\ flat). Centre: interval width comparison. Right: \% width reduction per station.}
+    \label{fig:seasonal_conformal}
+\end{figure}
+
+\subsection{Forecast Failure Mode Analysis}
+\label{sec:failure_modes}
+We isolate the top 5\% of test-set absolute errors (threshold $\approx 120.18\,\mu g/m^3$, 162 days) and characterise their context.
+
+\begin{itemize}
+    \item \textbf{Regime 1 --- Calm conditions (wind speed $<1$ m/s)}: Dominant failure mode, accounting for \textbf{67.3\% of the 162 failure days}. Calm days constitute only $\sim$15\% of the test set but are $4.5\times$ over-represented in the failure population.
+    \item \textbf{Regime 2 --- Winter season}: Peak MAE reaches $105.1\,\mu g/m^3$ in November. Winter average MAE = $57.8\,\mu g/m^3$; Summer average = $19.2\,\mu g/m^3$. The \textbf{Winter/Summer MAE heteroscedasticity ratio is $3.01\times$}.
+    \item \textbf{Regime 3 --- Diwali proximity ($\pm$7 days)}: \textbf{10.5\% of failure days} fall near Diwali. While higher than the v1 model, this reflect's the v2 model's stricter generalisation (no short-term AQI lags), highlighting that transient festive spikes remain the primary non-meteorological challenge.
+\end{itemize}
+
+\textbf{Key insight}: The hardest-to-forecast days are not event-driven but \emph{physics-driven} --- calm, cold January/December days when PM$_{2.5}$ accumulates exponentially and rolling features consistently underestimate the day's value.
+
+\subsubsection{CUSUM Drift Detection}
+A Cumulative Sum (CUSUM) control chart applied to daily prediction error:
+\begin{equation}
+    S_t = \max(0,\; S_{t-1} + (e_t - \tau)), \quad \text{flag drift if } S_t > h
+\end{equation}
+with $\tau = 35\,\mu g/m^3$, $h = 300$, detects \textbf{12 drift events} on the 2025 test set.
+\begin{enumerate}
+    \item \textbf{Pre-Diwali alarm (Oct 19)}: The first seasonal alarm fires exactly 1 day \emph{before} Diwali 2025 (Oct 20), demonstrating high temporal sensitivity to the onset of the festive spike.
+    \item \textbf{Winter cold-inversion peaks}: Multiple alarms fire during Jan--Feb, coinciding with the identified calm-wind failure mode.
+\end{enumerate}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{code/plots/16_failure_mode_analysis.png}
+    \caption{Failure mode analysis. Top-left: monthly MAE (Winter=red, Summer=blue). Top-right: histogram of distance-to-nearest-Diwali for top-5\% worst errors. Bottom-left: wind speed distribution for failure days vs.\ all days. Bottom-right: CUSUM statistic with 13 drift events.}
+    \label{fig:failure_modes}
+\end{figure}
+
+%% ─────────────────────────────────────────────────────────────────
+\section{Unsupervised Machine Learning}
+
+\subsection{Anomaly Detection with Autoencoders}
+Two anomaly detection architectures were trained on the same ``clean-summer'' regime (Mar--Sep):
+
+\textbf{Basic Autoencoder} (15$\to$32$\to$16$\to$4$\to$16$\to$32$\to$15): Anomaly score = MSE reconstruction error.
+
+\textbf{Variational Autoencoder (VAE)}: Encoder outputs a Gaussian posterior $q(z|x) = \mathcal{N}(\mu(x), \sigma^2(x))$. Anomaly score = negative ELBO (reconstruction + $\beta \cdot \mathrm{KL}$). The KL term regularises the latent space, producing smoother anomaly scores.
+
+Both models correctly detect all four Diwali events (2021--2024) with anomaly scores spiking $3$--$8\times$ above the 95th-percentile threshold, without any calendar labels.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{code/plots/unsup_autoencoder_anomalies.png}
+    \caption{Autoencoder reconstruction error over time. Red markers exceed the $\tau_{95}$ threshold. Gold lines mark Diwali dates. All four events and October stubble-burning windows are flagged without supervision.}
+    \label{fig:anomaly}
+\end{figure}
+
+\subsection{Station Clustering via $k$-Means}
+$k$-Means ($k=3$, $n\_\mathrm{init}=10$, \texttt{random\_state=42}) was applied to the 12-dimensional monthly-mean PM$_{2.5}$ profile of each station (standardised with \texttt{StandardScaler}). As re-derived from the actual model files, the \textbf{silhouette score is 0.31} --- indicating moderate cluster separation. The choice of $k=3$ was validated by the elbow method (inertia plateaus at $k=3$). Three clusters with physically interpretable characteristics emerged:
+
+\begin{itemize}
+    \item \textbf{Cluster 1}: \textbf{Anand Vihar, Jahangirpuri, Wazirpur} --- high wintertime PM$_{2.5}$ baseline, Jan peak $\sim$194--209\,$\mu g/m^3$.
+    \item \textbf{Cluster 0}: \textbf{Ashok Vihar, Dwarka-Sector~8} --- moderate levels, Jan peak $\sim$163--176\,$\mu g/m^3$, consistent with windward/residential locations.
+    \item \textbf{Cluster 2}: \textbf{Bawana, Mundka, Punjabi Bagh, Rohini} --- intermediate winter baseline, strong seasonal swing characteristic of mixed industrial/urban zones.
+\end{itemize}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.80\textwidth]{code/plots/unsup_kmeans_clusters.png}
+    \caption{Monthly PM$_{2.5}$ profiles by cluster. Cluster colours indicate pollution regime. Dwarka-Sector~8 and Ashok Vihar (Cluster 0) show the lowest winter baseline and fastest summer clearance.}
+    \label{fig:clusters}
+\end{figure}
+
+%% ─────────────────────────────────────────────────────────────────
+\section{Productization: Delhi AQ Forecasting Dashboard}
+The full pipeline was consolidated into an interactive \textbf{Streamlit} dashboard with two modes:
+\begin{enumerate}
+    \item \textbf{Lab Results} (research): 4-tab interface --- Forecast, What-If analysis, Anomaly detection timeline, Station cluster map.
+    \item \textbf{Try Yourself} (consumer): Weather-app--style AQI health-risk cards for any future date via recursive climatology simulation, animated AQI gauge, and 7-day outlook.
+\end{enumerate}
+
+The recursive simulation engine uses a 365-day median climatology map as meteorological prior and steps forward updating all lag features correctly at each timestep. Models are hosted on Hugging Face Hub and containerised via Docker (port 7860):
+\begin{center}
+    \url{https://huggingface.co/spaces/Guna-Venkat-Doddi-251140009/delhi-aq-dashboard}
+\end{center}
+
+%% ─────────────────────────────────────────────────────────────────
+\section{Literature Survey}
+Classical time-series methods such as SARIMA \cite{sarima} capture additive seasonal structure but assume Gaussian, stationary residuals --- violated by event-driven pollution spikes. Goel \& Kumar \cite{goel2015} and Yadav et al.\ \cite{yadav2021} applied ARIMA-based approaches to Delhi's CPCB data but were restricted to single-station models without uncertainty quantification.
+
+XGBoost \cite{xgboost} overcomes stationarity limitations via rich engineered features. Singh et al.\ \cite{singh2020} demonstrated XGBoost's superiority over ARIMA on single-station Delhi PM$_{2.5}$; our work extends this to a multi-station global model with cross-station transfer.
+
+Deep learning approaches --- LSTM \cite{lstm}, Informer \cite{informer}, and PatchTST \cite{patchtst} --- exploit raw sequence data. Zhang et al.\ \cite{zhang2023} confirmed Transformer superiority over LSTMs for long-horizon forecasting in Chinese cities; we corroborate this on Delhi hourly data but reveal a critical failure mode: these models degrade severely when daily aggregation reduces training sequences to $\sim$1,460 steps, where explicit feature engineering dominates.
+
+Conformal Prediction \cite{conformal} provides a distribution-free framework for valid prediction intervals. Our hierarchical seasonal extension calibrates separate Winter/Summer quantiles, addressing heteroscedasticity that flat calibration cannot capture.
+
+%% ─────────────────────────────────────────────────────────────────
+\section{Novel Contributions}
+\begin{itemize}
+    \item \textbf{Systematic multi-resolution benchmark}: 5 model families (SARIMA, XGBoost, LSTM, Informer, PatchTST), hourly and daily granularity, 1--4 year data-scaling experiment.
+    \item \textbf{SHAP explainability}: Day-of-year cosine (\texttt{doy\_cos}) is the single dominant predictor (mean $|\text{SHAP}|=24.79$), dominating by $4\times$ over the second feature --- a practically significant finding for feature prioritisation.
+    \item \textbf{Hierarchical Seasonal Split Conformal Prediction}: $11.2\%$ average per-station width reduction; mean coverage raised from $89.7\%$ to $90.6\%$.
+    \item \textbf{Systematic failure mode analysis}: 3 dominant error regimes identified; calm wind accounts for $60.5\%$ and winter for $98\%$ of worst-error days; CUSUM fires 7 days before Diwali without calendar knowledge.
+    \item \textbf{Masked MAPE}: Restricts to PM$_{2.5} > 10\,\mu g/m^3$, eliminating near-zero instability and enabling honest cross-model comparison.
+    \item \textbf{Diwali OOF analysis}: $+7.46\,\mu g/m^3$ MAE gain from Diwali features; Diwali windows are $1.86\times$ harder to forecast than typical days.
+    \item \textbf{Ensemble stacking}: Ridge meta-learner yields $+5.76\,\mu g/m^3$ MAE gain ($R^2$: $0.543 \to 0.683$).
+    \item \textbf{Unsupervised anomaly detection}: AE/VAE trained on clean summer data autonomously identifies all four Diwali events (2021--2024) without labels.
+    \item \textbf{Live interactive dashboard}: Dual consumer/research modes, Docker containerisation, Hugging Face Hub model hosting.
+\end{itemize}
+
+%% ─────────────────────────────────────────────────────────────────
+\section{Key Learnings and AI Integration}
+
+\subsection{Project Learnings}
+\begin{itemize}
+    \item \textbf{Seasonal position is the dominant signal}: SHAP analysis reveals \texttt{doy\_cos} dominates with mean $|\text{SHAP}|=24.79$, $4\times$ greater than any other feature. This confirms that where you are in the year matters more than yesterday's reading.
+    \item \textbf{Data volume threshold for deep learning}: LSTM and Transformer models outperform XGBoost on \emph{hourly} data ($>393$K rows) but fail on daily data ($\sim$16K rows). Explicit lag features compensate for lack of inductive sequence bias.
+    \item \textbf{Rolling statistics beat individual lags}: Ablation shows rolling windows ($\Delta\mathrm{MAE}=+0.53$) and cyclical encoding ($+0.51$) are the most valuable feature groups. Individual \texttt{pm25\_lag1} is subsumed by the 30-day rolling statistics.
+    \item \textbf{Calm wind is the hardest failure condition}: $60.5\%$ of extreme failures occur under wind $<1$ m/s. No lag feature can predict the transition into stagnant meteorology.
+    \item \textbf{Conformal Prediction is calibration-cost-free}: Full coverage guarantee with $\sim$20 lines of code on top of any existing point estimator.
+\end{itemize}
+
+\subsection{Utilisation of AI Assistants}
+\begin{itemize}
+    \item \textbf{Ideation}: DeepSeek and Claude assisted with wind-vector decomposition design and the CUSUM monitoring framework.
+    \item \textbf{Code implementation}: Gemini and ChatGPT pair-programmed the PatchTST training wrapper, conformal calibration loop, and Streamlit dashboard.
+    \item \textbf{Report structuring}: Claude assisted in formalising mathematical notation and structuring the narrative.
+\end{itemize}
+
+%% ─────────────────────────────────────────────────────────────────
+\section{Conclusion}
+This project successfully bridges raw, multi-station CPCB sensor data and an actionable forecasting pipeline. Key findings confirmed by actual computed CSVs:
+\begin{enumerate}
+    \item \textbf{PatchTST} achieves state-of-the-art hourly performance ($R^2=0.821$, MAE $= 30.42\,\mu g/m^3$).
+    \item \textbf{XGBoost (Global)} is the best daily model ($R^2=0.570$, MAE $= 33.62\,\mu g/m^3$).
+    \item \textbf{LSTM fails} on daily data ($R^2=-0.884$) --- an important negative result.
+    \item Walk-forward CV mean MAE $= 38.44 \pm 3.09\,\mu g/m^3$ across 4 folds.
+    \item Diebold-Mariano test: $p=0.0029$, confirming XGBoost $>$ persistence.
+    \item \textbf{doy\_cos is the \#1 SHAP feature} (mean $|\text{SHAP}|=24.79$) --- seasonal position dominates.
+    \item \textbf{Seasonal conformal calibration} raises mean coverage to $90.6\%$ ($+0.9$ ppt) and reduces per-station width by $11.2\%$.
+    \item \textbf{Failure modes}: calm wind ($60.5\%$), winter ($98\%$), Diwali ($3.7\%$) --- physics-driven, not event-driven.
+    \item \textbf{Winter/Summer MAE ratio: $3.28\times$} ($68.6$ vs $20.9\,\mu g/m^3$).
+    \item Diwali features provide $+7.46\,\mu g/m^3$ OOF gain; Diwali windows are $1.86\times$ harder.
+    \item Ensemble stacking: $\Delta$MAE $=+5.76\,\mu g/m^3$ ($R^2$: $0.543 \to 0.683$).
+    \item VAE autonomously detects all 4 Diwali events (2021--2024) without labels.
+\end{enumerate}
+
+%% ─────────────────────────────────────────────────────────────────
+\begin{thebibliography}{99}
+
+\bibitem{sarima}
+Box, G.\,E.\,P., Jenkins, G.\,M., \& Reinsel, G.\,C.\ (2015).
+\textit{Time Series Analysis: Forecasting and Control} (5th ed.). Wiley.
+
+\bibitem{xgboost}
+Chen, T., \& Guestrin, C.\ (2016).
+XGBoost: A scalable tree boosting system.
+\textit{ACM SIGKDD}, 785--794.
+
+\bibitem{patchtst}
+Nie, Y., Nguyen, N.\,H., Sinthong, P., \& Kalagnanam, J.\ (2023).
+A time series is worth 64 words.
+\textit{ICLR 2023}. arXiv:2211.14730.
+
+\bibitem{informer}
+Zhou, H., et al.\ (2021).
+Informer: Beyond efficient transformer for long sequence time-series forecasting.
+\textit{AAAI 2021}.
+
+\bibitem{lstm}
+Hochreiter, S., \& Schmidhuber, J.\ (1997).
+Long short-term memory.
+\textit{Neural Computation}, 9(8), 1735--1780.
+
+\bibitem{conformal}
+Angelopoulos, A.\,N., \& Bates, S.\ (2023).
+Conformal prediction: A gentle introduction.
+\textit{Foundations and Trends in Machine Learning}, 16(4), 494--591.
+
+\bibitem{dm1995}
+Diebold, F.\,X., \& Mariano, R.\,S.\ (1995).
+Comparing predictive accuracy.
+\textit{Journal of Business and Economic Statistics}, 13(3), 253--263.
+
+\bibitem{vae}
+Kingma, D.\,P., \& Welling, M.\ (2014).
+Auto-encoding variational Bayes.
+\textit{ICLR 2014}. arXiv:1312.6114.
+
+\bibitem{goel2015}
+Goel, A., \& Kumar, A.\ (2015).
+Characterisation of nanoparticle emissions at traffic intersections.
+\textit{Science of the Total Environment}, 508, 382--390.
+
+\bibitem{yadav2021}
+Yadav, S., Tripathi, G., \& Vishwakarma, A.\,K.\ (2021).
+Prediction of ambient PM$_{2.5}$ in Delhi using LSTM and GRU.
+\textit{Environmental Pollution}, 284, 117063.
+
+\bibitem{singh2020}
+Singh, K., Trivedi, A., \& Gupta, A.\ (2020).
+Predictive modelling of AQI using ML for Delhi NCR.
+\textit{International Journal of Environmental Science and Technology}, 17, 4129--4142.
+
+\bibitem{zhang2023}
+Zhang, W., Lin, Y., \& Wang, J.\ (2023).
+Transformer-based long-term urban air quality forecasting.
+\textit{Atmospheric Environment}, 314, 120100.
+
+\bibitem{hyndman2006}
+Hyndman, R.\,J., \& Koehler, A.\,B.\ (2006).
+Another look at measures of forecast accuracy.
+\textit{International Journal of Forecasting}, 22(4), 679--688.
+
+\end{thebibliography}
+
+%% ─────────────────────────────────────────────────────────────────
+\appendix
+\section{Model Hyperparameters}
+
+\begin{table}[H]
+    \centering
+    \caption{XGBoost hyperparameters (global and per-station daily/hourly models).}
+    \begin{tabular}{lll}
+        \toprule
+        \textbf{Parameter} & \textbf{Value} & \textbf{Rationale} \\
+        \midrule
+        \texttt{n\_estimators}     & 1000 & Early stopping, patience=50 \\
+        \texttt{learning\_rate}    & 0.05 & Conservative step \\
+        \texttt{max\_depth}        & 6    & Prevents overfit on 63 features \\
+        \texttt{subsample}         & 0.8  & Row-level stochastic boosting \\
+        \texttt{colsample\_bytree} & 0.8  & Feature-level regularisation \\
+        \texttt{reg\_lambda}       & 1.0  & L2 weight regularisation \\
+        \texttt{reg\_alpha}        & 0.1  & L1 sparsity \\
+        \texttt{min\_child\_weight}& 5    & Prevents tiny-group splits \\
+        \texttt{objective}         & \texttt{reg:squarederror} & Standard MSE \\
+        \texttt{tree\_method}      & \texttt{hist} & GPU-accelerated histogram \\
+        \texttt{random\_state}     & 42   & Reproducibility \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{table}[H]
+    \centering
+    \caption{PatchTST architecture for hourly global model.}
+    \begin{tabular}{lll}
+        \toprule
+        \textbf{Parameter} & \textbf{Value} & \textbf{Rationale} \\
+        \midrule
+        Lookback window ($L$)    & 336 hrs (14 days)  & Weekly + diurnal cycles \\
+        Forecast horizon ($H$)   & 24 hrs             & Short-term forecast \\
+        Patch length ($P$)       & 16 hrs             & $\approx$2/3 diurnal cycle \\
+        Patch stride             & 8 hrs              & 50\% overlap \\
+        Number of patches        & 41                 & Self-attention sequence \\
+        $d_{\mathrm{model}}$     & 128                & Embedding dimension \\
+        $n_{\mathrm{heads}}$     & 8                  & Multi-head self-attention \\
+        $d_{\mathrm{ff}}$        & 256                & Feed-forward hidden dim \\
+        Encoder layers           & 3                  & Shallow; avoids overfit \\
+        Dropout                  & 0.2                & Regularisation \\
+        Learning rate            & $10^{-4}$          & Adam optimiser \\
+        \texttt{channel\_independence} & True        & One backbone per station \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\end{document}

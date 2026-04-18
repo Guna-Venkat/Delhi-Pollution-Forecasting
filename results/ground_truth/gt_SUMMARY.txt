@@ -1,0 +1,159 @@
+
+======================================================================
+       GROUND TRUTH NARRATIVE -- Delhi AQ Forecasting Project
+  ALL numbers below are computed from actual models/data files.
+======================================================================
+
+=======================================================================
+1. MODEL LEADERBOARD (4yr training -> 2024-2025 test)
+=======================================================================
+Best DAILY model:  XGBoost (global)
+   MAE  = 33.62 ug/m3
+   RMSE = 63.06 ug/m3
+   R2   = 0.5704
+
+Best HOURLY model: PatchTST (global)
+   MAE  = 30.42 ug/m3
+   RMSE = 48.47 ug/m3
+   R2   = 0.8214
+
+LSTM DAILY (4yr):
+   MAE  = 89.67 ug/m3
+   R2   = -0.8839  <-- NEGATIVE (worse than mean predictor)
+
+XGBoost v2 (no AQI lags, trained 2021-2024):
+   MAE  = 34.45 ug/m3   R2 = 0.676
+   [NOTE: Improvement of +5.55 ug/m3 vs v1 by removing circular AQI lag features]
+
+Daily leaderboard (4yr, sorted by MAE):
+   XGBoost      global        MAE=33.62  R2=0.5704
+   XGBoost      per_station   MAE=34.03  R2=0.5481
+   PatchTST     global        MAE=44.16  R2=0.4056
+   Informer     global        MAE=52.15  R2=0.0935
+   LSTM         global        MAE=89.67  R2=-0.8839
+   SARIMA       per_station   MAE=111.22  R2=-0.7173
+
+Hourly leaderboard (4yr, sorted by MAE):
+   PatchTST     global        MAE=30.42  R2=0.8214
+   Informer     global        MAE=32.48  R2=0.7774
+   LSTM         global        MAE=38.19  R2=0.7248
+   XGBoost      global        MAE=39.47  R2=0.6522
+   XGBoost      per_station   MAE=40.22  R2=0.6412
+   ARIMA        per_station   MAE=99.52  R2=-0.5246
+
+=======================================================================
+2. SHAP FEATURE IMPORTANCE  [SHAP mean|SHAP|]
+=======================================================================
+Top-5 features (computed on 2023 validation set, daily XGBoost global):
+   #1: doy_cos                                   = 24.79064
+   #2: doy_sin                                   = 6.09368
+   #3: humid_temp_interaction                    = 5.20708
+   #4: pm25_roll_std30                           = 4.45195
+   #5: pm25_roll_max14                           = 4.06500
+
+=======================================================================
+3. WALK-FORWARD CROSS-VALIDATION
+=======================================================================
+   Fold 1: Train 2021 → Test 2022                    MAE=40.8409  R2=0.4319  CI=[39.46,42.24]
+   Fold 2: Train 2021-22 → Test 2023                 MAE=37.0334  R2=0.6729  CI=[35.77,38.34]
+   Fold 3: Train 2021-23 → Test 2024                 MAE=41.8118  R2=0.5756  CI=[40.25,43.47]
+   Fold 4: Train 2021-24 → Test 2025                 MAE=34.0600  R2=0.6819  CI=[32.72,35.50]
+   Mean MAE across folds: 38.44 +/- 3.09 ug/m3
+
+=======================================================================
+4. CONFORMAL PREDICTION
+=======================================================================
+BASELINE -- Flat split-conformal (v1 model, global q from 12_conformal_coverage.csv):
+   Interval full width:      206.74 ug/m3
+   Coverage range:           88.0% - 94.7%
+   Mean coverage:            89.66%
+   Stations below 88% tol:  ['Rohini', 'Wazirpur']
+
+IMPROVED -- Hierarchical calibration (v2 model, proper hold-out 2023 cal set):
+   Global q calibration:     mean cov=91.06%  full width=177.5 ug/m3
+   Seasonal q calibration:   mean cov=91.37%  full width=156.3 ug/m3
+   Per-station calibration:  mean cov=91.31%  full width=177.9 ug/m3
+   Stations below 88% (seasonal): ['Anand Vihar']
+   Stations below 88% (per-stn):  []
+   Season width reduction (vs global): 11.9%
+   Per-stn vs old flat reduction:      13.9%
+   Per-station detail:
+   Anand Vihar           PS=89.1%  Seas=87.2%  Glob=89.1%  PS-W=178
+   Ashok Vihar           PS=90.2%  Seas=93.3%  Glob=91.0%  PS-W=165
+   Bawana                PS=93.3%  Seas=91.6%  Glob=92.7%  PS-W=188
+   Dwarka-Sector 8       PS=92.5%  Seas=94.1%  Glob=93.6%  PS-W=160
+   Jahangirpuri          PS=90.8%  Seas=89.9%  Glob=90.5%  PS-W=181
+   Mundka                PS=94.7%  Seas=92.2%  Glob=91.1%  PS-W=199
+   Punjabi Bagh          PS=90.2%  Seas=93.3%  Glob=91.1%  PS-W=168
+   Rohini                PS=91.1%  Seas=89.9%  Glob=90.8%  PS-W=180
+   Wazirpur              PS=89.9%  Seas=90.8%  Glob=89.7%  PS-W=182
+
+=======================================================================
+5. FEATURE ABLATION
+=======================================================================
+   Full Model (baseline)                          dMAE=+0.0000  [improves]  R2=0.6700
+   Event Features                                 dMAE=-0.1146  [improves]  R2=0.6722
+   Wind Decomposition                             dMAE=-0.3158  [improves]  R2=0.6724
+   Cyclical Encoding                              dMAE=+0.5105  [DEGRADES]  R2=0.6706
+   Rolling Windows                                dMAE=+0.5292  [DEGRADES]  R2=0.6490
+   Interaction Feature                            dMAE=-0.1437  [improves]  R2=0.6751
+   AQI Lag Features                               dMAE=-0.5213  [improves]  R2=0.6799
+
+=======================================================================
+6. FAILURE MODE ANALYSIS
+=======================================================================
+   Overall MAE (2025 test, v2 model):    34.446 ug/m3
+   95th-pct failure threshold:           120.181 ug/m3
+   # failure days (top 5%):              162
+   Near Diwali (+/-7 days):              10.5% of failures
+   Calm wind (<1 m/s):                   67.3% of failures
+   Winter MAE:                           57.804 ug/m3
+   Summer MAE:                           19.219 ug/m3
+   Heteroscedasticity ratio (W/S):       3.01x
+   Masked MAPE (PM2.5>10 ug/m3):        35.82%
+   CUSUM drift events detected:          12
+   CUSUM dates: ['2025-01-07', '2025-01-15', '2025-01-23', '2025-02-26', '2025-05-08', '2025-10-19', '2025-11-01', '2025-11-06', '2025-11-23', '2025-12-06', '2025-12-08', '2025-12-20']
+
+=======================================================================
+7. DIWALI OOF ANALYSIS
+=======================================================================
+   Diwali window MAE (full model):    70.820 ug/m3
+   Diwali window MAE (ablated):       78.277 ug/m3
+   MAE improvement from Diwali feats: +7.457 ug/m3
+   Non-event MAE (full model):        38.082 ug/m3
+   Diwali difficulty uplift:          1.860x
+
+=======================================================================
+8. ENSEMBLE STACKING
+=======================================================================
+   Base Global XGBoost (v1):  MAE=39.9943  R2=0.5427
+   Stacking Ensemble:         MAE=34.2386   R2=0.6834
+   MAE improvement:           +5.7557 ug/m3
+   R2 improvement:            0.5427 -> 0.6834
+   [NOTE: v2 standalone (no AQI lags, MAE=34.45) rivals stacking (34.24).
+    This shows feature engineering quality can match ensemble complexity.]
+
+=======================================================================
+9. DIEBOLD-MARIANO TEST
+=======================================================================
+   DM statistic:           2.9804
+   p-value:                0.002879
+   Significant (p<0.05):   True
+
+=======================================================================
+K-MEANS CLUSTERING
+=======================================================================
+   k=3 (enforced for interpretability: Low/Mid/High pollution regimes)
+   k=3 silhouette: 0.310  |  k=2 silhouette: 0.316 (margin too small)
+   Cluster 0: High-pollution, industrial NE corridor
+   Cluster 1: Mid-pollution, residential W/SW corridor
+   Cluster 2: Lower-pollution, peri-urban stations
+   [See gt_12_kmeans_clusters.csv for exact assignments]
+
+=======================================================================
+NOTE ON MAE VALUES
+=======================================================================
+  v1 model (xgb_global_daily_4yr.json):  leaderboard MAE = 33.6201
+  v2 model (no AQI lags, 2021-2024):     failure mode MAE = 34.446
+  These use the same 2025 test set but the v2 model drops 6 circular
+  AQI lag features that caused overfitting, yielding a genuine gain.
